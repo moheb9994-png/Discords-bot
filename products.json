@@ -1,0 +1,14 @@
+[
+  {
+    "id": "p1",
+    "name": "منتج تجريبي",
+    "price": 10,
+    "description": "عدّل هذا المنتج من data/products.json"
+  },
+  {
+    "id": "p2",
+    "name": "منتج ثاني",
+    "price": 25,
+    "description": "مثال لمنتج آخر"
+  }
+]

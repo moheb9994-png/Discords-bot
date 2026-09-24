@@ -14,6 +14,9 @@ const {
   EmbedBuilder,
   ChannelType,
   StringSelectMenuBuilder,
+  ModalBuilder,
+  TextInputBuilder,
+  TextInputStyle,
 } = require("discord.js");
 
 const fs = require("fs");
@@ -25,6 +28,8 @@ const {
   createAudioResource,
   AudioPlayerStatus,
   NoSubscriberBehavior,
+  VoiceConnectionStatus,
+  entersState,
 } = require("@discordjs/voice");
 
 const play = require("play-dl");
@@ -36,9 +41,7 @@ const play = require("play-dl");
 const env = process.env;
 
 if (!env.DISCORD_TOKEN || !env.GUILD_ID) {
-  console.error(
-    "❌ ضع DISCORD_TOKEN و GUILD_ID في Railway Variables"
-  );
+  console.error("❌ ضع DISCORD_TOKEN و GUILD_ID في Railway Variables");
   process.exit(1);
 }
 
@@ -49,34 +52,18 @@ if (!env.DISCORD_TOKEN || !env.GUILD_ID) {
 const dataDir = path.join(__dirname, "data");
 
 if (!fs.existsSync(dataDir)) {
-  fs.mkdirSync(dataDir, {
-    recursive: true,
-  });
+  fs.mkdirSync(dataDir, { recursive: true });
 }
 
-// ---------------- PRODUCTS ----------------
-
-const productsFile = path.join(
-  dataDir,
-  "products.json"
-);
+const productsFile = path.join(dataDir, "products.json");
 
 if (!fs.existsSync(productsFile)) {
-  fs.writeFileSync(
-    productsFile,
-    "[]",
-    "utf8"
-  );
+  fs.writeFileSync(productsFile, "[]", "utf8");
 }
 
 function getProducts() {
   try {
-    return JSON.parse(
-      fs.readFileSync(
-        productsFile,
-        "utf8"
-      )
-    );
+    return JSON.parse(fs.readFileSync(productsFile, "utf8"));
   } catch {
     return [];
   }
@@ -85,51 +72,7 @@ function getProducts() {
 function saveProducts(products) {
   fs.writeFileSync(
     productsFile,
-    JSON.stringify(
-      products,
-      null,
-      2
-    ),
-    "utf8"
-  );
-}
-
-// ---------------- 24/7 ----------------
-
-const voice247File = path.join(
-  dataDir,
-  "247.json"
-);
-
-if (!fs.existsSync(voice247File)) {
-  fs.writeFileSync(
-    voice247File,
-    "{}",
-    "utf8"
-  );
-}
-
-function get247() {
-  try {
-    return JSON.parse(
-      fs.readFileSync(
-        voice247File,
-        "utf8"
-      )
-    );
-  } catch {
-    return {};
-  }
-}
-
-function save247(data) {
-  fs.writeFileSync(
-    voice247File,
-    JSON.stringify(
-      data,
-      null,
-      2
-    ),
+    JSON.stringify(products, null, 2),
     "utf8"
   );
 }
@@ -145,11 +88,38 @@ const client = new Client({
     GatewayIntentBits.MessageContent,
     GatewayIntentBits.GuildVoiceStates,
   ],
-
   partials: [
     Partials.Channel,
+    Partials.Message,
   ],
 });
+
+// ==================================================
+// PERMISSIONS
+// ==================================================
+
+function isStaff(interaction) {
+  if (!interaction.member) return false;
+
+  if (
+    interaction.member.permissions &&
+    interaction.member.permissions.has(
+      PermissionFlagsBits.ManageGuild
+    )
+  ) {
+    return true;
+  }
+
+  if (
+    env.STAFF_ROLE_ID &&
+    interaction.member.roles &&
+    interaction.member.roles.cache.has(env.STAFF_ROLE_ID)
+  ) {
+    return true;
+  }
+
+  return false;
+}
 
 // ==================================================
 // MUSIC
@@ -159,19 +129,57 @@ const musicQueues = new Map();
 
 function getQueue(guildId) {
   if (!musicQueues.has(guildId)) {
+    const player = createAudioPlayer({
+      behaviors: {
+        noSubscriber: NoSubscriberBehavior.Pause,
+      },
+    });
+
     musicQueues.set(guildId, {
       songs: [],
-
-      player: createAudioPlayer({
-        behaviors: {
-          noSubscriber:
-            NoSubscriberBehavior.Pause,
-        },
-      }),
-
+      player,
       connection: null,
       playing: false,
-      listenerAdded: false,
+    });
+
+    player.on(AudioPlayerStatus.Idle, async () => {
+      const queue = musicQueues.get(guildId);
+
+      if (!queue) return;
+
+      if (queue.songs.length) {
+        queue.songs.shift();
+      }
+
+      if (queue.songs.length) {
+        const guild = client.guilds.cache.get(guildId);
+
+        if (guild) {
+          await playNext(guild).catch(console.error);
+        }
+      } else {
+        queue.playing = false;
+      }
+    });
+
+    player.on("error", async error => {
+      console.error("❌ Music player error:", error);
+
+      const queue = musicQueues.get(guildId);
+
+      if (!queue) return;
+
+      if (queue.songs.length) {
+        queue.songs.shift();
+      }
+
+      const guild = client.guilds.cache.get(guildId);
+
+      if (guild && queue.songs.length) {
+        await playNext(guild).catch(console.error);
+      } else {
+        queue.playing = false;
+      }
     });
   }
 
@@ -179,636 +187,379 @@ function getQueue(guildId) {
 }
 
 async function playNext(guild) {
-  const queue =
-    getQueue(guild.id);
+  const queue = getQueue(guild.id);
 
   if (!queue.songs.length) {
     queue.playing = false;
     return;
   }
 
-  const song =
-    queue.songs[0];
+  const song = queue.songs[0];
 
   try {
-    const stream =
-      await play.stream(
-        song.url,
-        {
-          discordPlayerCompatibility:
-            true,
-        }
-      );
+    const stream = await play.stream(song.url, {
+      discordPlayerCompatibility: true,
+    });
 
-    const resource =
-      createAudioResource(
-        stream.stream,
-        {
-          inputType:
-            stream.type,
-        }
-      );
+    const resource = createAudioResource(
+      stream.stream,
+      {
+        inputType: stream.type,
+      }
+    );
 
     queue.player.play(resource);
-
     queue.playing = true;
 
-    stream.stream.on(
-      "error",
-      () => {
+    stream.stream.on("error", async error => {
+      console.error("❌ Stream error:", error);
 
+      if (queue.songs.length) {
         queue.songs.shift();
-
-        playNext(guild)
-          .catch(console.error);
-
       }
-    );
+
+      await playNext(guild).catch(console.error);
+    });
 
   } catch (error) {
-
-    console.error(
-      "Music error:",
-      error
-    );
-
-    queue.songs.shift();
+    console.error("❌ Music error:", error);
 
     if (queue.songs.length) {
-
-      playNext(guild)
-        .catch(console.error);
-
-    } else {
-
-      queue.playing = false;
-
+      queue.songs.shift();
     }
 
+    if (queue.songs.length) {
+      await playNext(guild).catch(console.error);
+    } else {
+      queue.playing = false;
+    }
   }
 }
 
 // ==================================================
-// 24/7 VOICE SYSTEM
+// 24/7 VOICE
 // ==================================================
 
-async function connect247(guild) {
+let voice247Connection = null;
 
-  const data = get247();
-
-  const channelId =
-    data[guild.id];
-
-  if (!channelId) {
-    return false;
-  }
-
-  const channel =
-    guild.channels.cache.get(
-      channelId
-    );
-
-  if (
-    !channel ||
-    channel.type !==
-      ChannelType.GuildVoice
-  ) {
-
-    console.log(
-      `⚠️ روم 24/7 غير موجود في ${guild.name}`
-    );
-
-    return false;
-  }
-
+async function connect247() {
   try {
-
-    const queue =
-      getQueue(
-        guild.id
+    if (!env.VOICE_247_CHANNEL_ID) {
+      console.log(
+        "ℹ️ VOICE_247_CHANNEL_ID غير موجود - تم تخطي نظام 24/7"
       );
-
-    if (
-      queue.connection
-    ) {
-
-      try {
-        queue.connection.destroy();
-      } catch {}
-
-      queue.connection =
-        null;
+      return;
     }
 
-    const connection =
-      joinVoiceChannel({
+    const guild = client.guilds.cache.get(env.GUILD_ID);
 
-        channelId:
-          channel.id,
+    if (!guild) {
+      console.log("❌ البوت غير موجود في السيرفر المحدد.");
+      return;
+    }
 
-        guildId:
-          guild.id,
+    const channel = guild.channels.cache.get(
+      env.VOICE_247_CHANNEL_ID
+    );
 
-        adapterCreator:
-          guild.voiceAdapterCreator,
+    if (
+      !channel ||
+      channel.type !== ChannelType.GuildVoice
+    ) {
+      console.log(
+        "❌ VOICE_247_CHANNEL_ID غير صحيح أو الروم ليس صوتيًا."
+      );
+      return;
+    }
 
-        selfDeaf:
-          true,
+    if (
+      voice247Connection &&
+      voice247Connection.state.status !==
+        VoiceConnectionStatus.Destroyed
+    ) {
+      return;
+    }
 
-        selfMute:
-          true,
+    voice247Connection = joinVoiceChannel({
+      channelId: channel.id,
+      guildId: guild.id,
+      adapterCreator: guild.voiceAdapterCreator,
+      selfDeaf: true,
+      selfMute: true,
+    });
 
-      });
+    voice247Connection.on(
+      VoiceConnectionStatus.Disconnected,
+      async () => {
+        console.log("⚠️ اتصال 24/7 انقطع...");
 
-    queue.connection =
-      connection;
+        try {
+          await Promise.race([
+            entersState(
+              voice247Connection,
+              VoiceConnectionStatus.Signalling,
+              5000
+            ),
+            entersState(
+              voice247Connection,
+              VoiceConnectionStatus.Connecting,
+              5000
+            ),
+          ]);
 
-    connection.on(
-      "stateChange",
-      (oldState, newState) => {
+          console.log("✅ تم استعادة اتصال 24/7");
 
-        if (
-          newState.status ===
-          "disconnected"
-        ) {
-
+        } catch {
           console.log(
-            `🔄 محاولة إعادة الاتصال بـ ${channel.name}`
+            "🔄 إعادة الاتصال بروم 24/7..."
           );
 
+          try {
+            voice247Connection.destroy();
+          } catch {}
+
+          voice247Connection = null;
+
           setTimeout(() => {
-
-            connect247(
-              guild
-            ).catch(
-              console.error
-            );
-
-          }, 5000);
-
+            connect247().catch(console.error);
+          }, 3000);
         }
+      }
+    );
 
+    voice247Connection.on(
+      VoiceConnectionStatus.Destroyed,
+      () => {
+        voice247Connection = null;
       }
     );
 
     console.log(
-      `🔊 24/7 متصل في ${guild.name} / ${channel.name}`
+      `🔊 البوت دخل روم 24/7: ${channel.name}`
     );
 
-    return true;
-
   } catch (error) {
-
     console.error(
-      "❌ خطأ 24/7:",
+      "❌ خطأ في اتصال 24/7:",
       error
     );
 
-    return false;
+    voice247Connection = null;
+
+    setTimeout(() => {
+      connect247().catch(console.error);
+    }, 10000);
   }
 }
 
 // ==================================================
-// PERMISSIONS
-// ==================================================
-
-function isStaff(interaction) {
-
-  if (!interaction.member) {
-    return false;
-  }
-
-  if (
-    interaction.member.permissions &&
-    interaction.member.permissions.has(
-      PermissionFlagsBits.ManageGuild
-    )
-  ) {
-
-    return true;
-  }
-
-  if (
-    env.STAFF_ROLE_ID &&
-    interaction.member.roles &&
-    interaction.member.roles.cache.has(
-      env.STAFF_ROLE_ID
-    )
-  ) {
-
-    return true;
-  }
-
-  return false;
-}
-
-// ==================================================
-// COMMANDS
+// STORE COMMANDS
 // ==================================================
 
 const commands = [
 
-  // ==================================================
   // STORE
-  // ==================================================
 
   new SlashCommandBuilder()
     .setName("store")
-    .setDescription(
-      "عرض متجر Soork Store"
-    ),
+    .setDescription("عرض متجر Soork Store"),
 
   new SlashCommandBuilder()
     .setName("setup")
-    .setDescription(
-      "إرسال لوحة المتجر"
-    )
+    .setDescription("إرسال لوحة المتجر")
     .setDefaultMemberPermissions(
       PermissionFlagsBits.ManageGuild
     ),
 
   new SlashCommandBuilder()
     .setName("products")
-    .setDescription(
-      "عرض المنتجات"
-    ),
+    .setDescription("عرض المنتجات"),
 
-  // ==================================================
   // PRODUCTS
-  // ==================================================
 
   new SlashCommandBuilder()
     .setName("addproduct")
-    .setDescription(
-      "إضافة منتج"
-    )
+    .setDescription("إضافة منتج")
     .setDefaultMemberPermissions(
       PermissionFlagsBits.ManageGuild
     )
-
     .addStringOption(o =>
-      o
-        .setName("name")
-        .setDescription(
-          "اسم المنتج"
-        )
+      o.setName("name")
+        .setDescription("اسم المنتج")
         .setRequired(true)
     )
-
     .addNumberOption(o =>
-      o
-        .setName("price")
-        .setDescription(
-          "السعر"
-        )
+      o.setName("price")
+        .setDescription("السعر")
         .setRequired(true)
         .setMinValue(0)
     )
-
     .addIntegerOption(o =>
-      o
-        .setName("stock")
-        .setDescription(
-          "المخزون"
-        )
+      o.setName("stock")
+        .setDescription("المخزون")
         .setRequired(true)
         .setMinValue(0)
     )
-
     .addStringOption(o =>
-      o
-        .setName("description")
-        .setDescription(
-          "وصف المنتج"
-        )
+      o.setName("description")
+        .setDescription("وصف المنتج")
         .setRequired(false)
     ),
 
   new SlashCommandBuilder()
     .setName("removeproduct")
-    .setDescription(
-      "حذف منتج"
-    )
+    .setDescription("حذف منتج")
     .setDefaultMemberPermissions(
       PermissionFlagsBits.ManageGuild
     )
-
     .addStringOption(o =>
-      o
-        .setName("id")
-        .setDescription(
-          "ID المنتج"
-        )
+      o.setName("id")
+        .setDescription("ID المنتج")
         .setRequired(true)
     ),
 
   new SlashCommandBuilder()
     .setName("editproduct")
-    .setDescription(
-      "تعديل منتج"
-    )
+    .setDescription("تعديل منتج")
     .setDefaultMemberPermissions(
       PermissionFlagsBits.ManageGuild
     )
-
     .addStringOption(o =>
-      o
-        .setName("id")
-        .setDescription(
-          "ID المنتج"
-        )
+      o.setName("id")
+        .setDescription("ID المنتج")
         .setRequired(true)
     )
-
     .addStringOption(o =>
-      o
-        .setName("name")
-        .setDescription(
-          "الاسم الجديد"
-        )
+      o.setName("name")
+        .setDescription("الاسم الجديد")
         .setRequired(false)
     )
-
     .addNumberOption(o =>
-      o
-        .setName("price")
-        .setDescription(
-          "السعر الجديد"
-        )
+      o.setName("price")
+        .setDescription("السعر الجديد")
         .setRequired(false)
         .setMinValue(0)
     )
-
     .addIntegerOption(o =>
-      o
-        .setName("stock")
-        .setDescription(
-          "المخزون الجديد"
-        )
+      o.setName("stock")
+        .setDescription("المخزون الجديد")
         .setRequired(false)
         .setMinValue(0)
     )
-
     .addStringOption(o =>
-      o
-        .setName("description")
-        .setDescription(
-          "الوصف الجديد"
-        )
+      o.setName("description")
+        .setDescription("الوصف الجديد")
         .setRequired(false)
     ),
 
   new SlashCommandBuilder()
     .setName("stock")
-    .setDescription(
-      "عرض المخزون"
-    )
+    .setDescription("عرض المخزون")
     .setDefaultMemberPermissions(
       PermissionFlagsBits.ManageGuild
     ),
 
-  // ==================================================
-  // TICKETS
-  // ==================================================
+  // TICKET
 
   new SlashCommandBuilder()
     .setName("ticket")
-    .setDescription(
-      "فتح لوحة التذاكر"
-    ),
+    .setDescription("إرسال لوحة التكت"),
 
-  new SlashCommandBuilder()
-    .setName("close")
-    .setDescription(
-      "إغلاق التكت"
-    ),
-
-  // ==================================================
-  // MODERATION
-  // ==================================================
-
-  new SlashCommandBuilder()
-    .setName("ban")
-    .setDescription(
-      "حظر عضو"
-    )
-    .setDefaultMemberPermissions(
-      PermissionFlagsBits.BanMembers
-    )
-
-    .addUserOption(o =>
-      o
-        .setName("user")
-        .setDescription(
-          "العضو"
-        )
-        .setRequired(true)
-    )
-
-    .addStringOption(o =>
-      o
-        .setName("reason")
-        .setDescription(
-          "سبب الحظر"
-        )
-        .setRequired(false)
-    ),
-
-  new SlashCommandBuilder()
-    .setName("kick")
-    .setDescription(
-      "طرد عضو"
-    )
-    .setDefaultMemberPermissions(
-      PermissionFlagsBits.KickMembers
-    )
-
-    .addUserOption(o =>
-      o
-        .setName("user")
-        .setDescription(
-          "العضو"
-        )
-        .setRequired(true)
-    )
-
-    .addStringOption(o =>
-      o
-        .setName("reason")
-        .setDescription(
-          "سبب الطرد"
-        )
-        .setRequired(false)
-    ),
-
-  // ==================================================
   // MUSIC
-  // ==================================================
 
   new SlashCommandBuilder()
     .setName("play")
-    .setDescription(
-      "تشغيل أغنية"
-    )
-
+    .setDescription("تشغيل أغنية")
     .addStringOption(o =>
-      o
-        .setName("song")
-        .setDescription(
-          "اسم الأغنية أو الرابط"
-        )
+      o.setName("song")
+        .setDescription("اسم الأغنية أو الرابط")
         .setRequired(true)
     ),
 
   new SlashCommandBuilder()
     .setName("skip")
-    .setDescription(
-      "تخطي الأغنية"
-    ),
+    .setDescription("تخطي الأغنية"),
 
   new SlashCommandBuilder()
     .setName("stop")
-    .setDescription(
-      "إيقاف الموسيقى"
-    ),
+    .setDescription("إيقاف الموسيقى"),
 
   new SlashCommandBuilder()
     .setName("pause")
-    .setDescription(
-      "إيقاف مؤقت"
-    ),
+    .setDescription("إيقاف مؤقت"),
 
   new SlashCommandBuilder()
     .setName("resume")
-    .setDescription(
-      "استكمال الأغنية"
-    ),
+    .setDescription("استكمال الأغنية"),
 
   new SlashCommandBuilder()
     .setName("queue")
-    .setDescription(
-      "عرض قائمة الأغاني"
-    ),
+    .setDescription("عرض قائمة الأغاني"),
 
-  // ==================================================
   // 24/7
-  // ==================================================
 
   new SlashCommandBuilder()
     .setName("247")
-    .setDescription(
-      "إبقاء البوت في الروم الصوتي 24/7"
-    )
+    .setDescription("إدخال البوت روم 24/7")
     .setDefaultMemberPermissions(
       PermissionFlagsBits.ManageGuild
     ),
 
   new SlashCommandBuilder()
-    .setName("247off")
-    .setDescription(
-      "إيقاف وضع 24/7"
-    )
+    .setName("247stop")
+    .setDescription("إخراج البوت من روم 24/7")
     .setDefaultMemberPermissions(
       PermissionFlagsBits.ManageGuild
     ),
 
-].map(command =>
-  command.toJSON()
-);
+].map(command => command.toJSON());
 
 // ==================================================
 // STORE EMBED
 // ==================================================
 
 function storeEmbed() {
-
   return new EmbedBuilder()
-
     .setTitle(
-      `🛒 ${
-        env.STORE_NAME ||
-        "Soork Store"
-      }`
+      `🛒 ${env.STORE_NAME || "Soork Store"}`
     )
-
     .setDescription(
-
       "اختر المنتج من القائمة لفتح طلب خاص.\n\n" +
-
       "💳 بعد فتح الطلب ستظهر بيانات تحويل الراجحي.\n" +
-
       "📤 بعد التحويل ارفع إثبات الدفع.\n" +
-
       "✅ الإدارة تؤكد الدفع بعد مراجعة الإثبات."
-
-    )
-
-    .setFooter({
-      text:
-        "Soork Store",
-    });
+    );
 }
 
-// ==================================================
-// PRODUCT MENU
-// ==================================================
-
 function productMenu() {
+  const products = getProducts()
+    .filter(p => Number(p.stock) > 0)
+    .slice(0, 25);
 
-  const products =
-    getProducts()
-      .filter(
-        p =>
-          Number(p.stock) > 0
-      )
-      .slice(0, 25);
-
-  const menu =
-    new StringSelectMenuBuilder()
-      .setCustomId(
-        "select_product"
-      )
-      .setPlaceholder(
-        "🛒 اختر المنتج"
-      );
+  const menu = new StringSelectMenuBuilder()
+    .setCustomId("select_product")
+    .setPlaceholder("🛒 اختر المنتج");
 
   if (!products.length) {
-
     menu.addOptions({
-
-      label:
-        "لا توجد منتجات متوفرة",
-
-      value:
-        "none",
-
+      label: "لا توجد منتجات متوفرة",
+      value: "none",
     });
-
   } else {
-
     menu.addOptions(
+      products.map(product => ({
+        label:
+          `${product.name} - ${product.price} ريال`
+            .slice(0, 100),
 
-      products.map(
-        product => ({
+        description:
+          String(
+            product.description || "بدون وصف"
+          ).slice(0, 100),
 
-          label:
-            `${product.name} - ${product.price} ريال`
-              .slice(0, 100),
-
-          description:
-            String(
-              product.description ||
-              "بدون وصف"
-            ).slice(0, 100),
-
-          value:
-            product.id,
-
-        })
-      )
-
+        value: product.id,
+      }))
     );
-
   }
 
   return menu;
@@ -818,243 +569,368 @@ function productMenu() {
 // PAYMENT
 // ==================================================
 
-function paymentEmbed(product) {
+function paymentEmbed(product = null) {
+
+  let description =
+    `**البنك:** ${
+      env.RAJHI_BANK_NAME ||
+      "مصرف الراجحي"
+    }\n\n` +
+
+    `**اسم صاحب الحساب:** ${
+      env.RAJHI_ACCOUNT_NAME ||
+      "غير مضبوط"
+    }\n\n` +
+
+    `**الآيبان:** \`${
+      env.RAJHI_IBAN ||
+      "غير مضبوط"
+    }\``;
+
+  if (product) {
+    description +=
+      `\n\n**المبلغ:** **${product.price} ريال**`;
+  }
+
+  description +=
+    "\n\n📤 بعد التحويل أرسل إثبات الدفع داخل التكت.";
 
   return new EmbedBuilder()
+    .setTitle("💳 بيانات التحويل")
+    .setDescription(description);
+}
 
+// ==================================================
+// TICKET PANEL
+// ==================================================
+
+function ticketPanelEmbed() {
+  return new EmbedBuilder()
     .setTitle(
-      "💳 تحويل الراجحي"
+      `🎫 ${env.STORE_NAME || "Soork Store"} | التذاكر`
     )
-
     .setDescription(
+      "مرحبًا بك في نظام الدعم.\n\n" +
 
-      `**البنك:** ${
-        env.RAJHI_BANK_NAME ||
-        "مصرف الراجحي"
-      }\n` +
+      "🛒 **تكت شراء**\n" +
+      "لشراء منتج أو الاستفسار عن الطلبات.\n\n" +
 
-      `**اسم صاحب الحساب:** ${
-        env.RAJHI_ACCOUNT_NAME ||
-        "غير مضبوط"
-      }\n` +
+      "📞 **تكت دعم فني**\n" +
+      "للاستفسارات والمشاكل والدعم.\n\n" +
 
-      `**الآيبان:** \`${
-        env.RAJHI_IBAN ||
-        "غير مضبوط"
-      }\`\n` +
+      "اضغط على الزر المناسب لفتح تكت خاص مع الإدارة.\n\n" +
 
-      `**المبلغ:** **${product.price} ريال**\n\n` +
+      "━━━━━━━━━━━━━━━━━━━━\n\n" +
 
-      "📤 بعد التحويل ارفع صورة إثبات الدفع داخل الطلب.\n\n" +
+      "💳 **بيانات التحويل تظهر داخل التكت عند الحاجة.**"
+    )
+    .setFooter({
+      text: "Soork Store • نظام التذاكر",
+    });
+}
 
-      "⚠️ لا يتم اعتبار الطلب مدفوعًا حتى يتم تأكيده من الإدارة."
+function ticketPanelButtons() {
 
-    );
+  return new ActionRowBuilder().addComponents(
+
+    new ButtonBuilder()
+      .setCustomId("create_purchase_ticket")
+      .setLabel("تكت شراء")
+      .setEmoji("🛒")
+      .setStyle(ButtonStyle.Success),
+
+    new ButtonBuilder()
+      .setCustomId("create_support_ticket")
+      .setLabel("تكت دعم فني")
+      .setEmoji("📞")
+      .setStyle(ButtonStyle.Primary)
+
+  );
 }
 
 // ==================================================
-// ORDER BUTTONS
+// TICKET CONTROL BUTTONS
 // ==================================================
 
-function orderButtons() {
+function ticketControlButtons(claimed = false) {
 
-  return new ActionRowBuilder()
-    .addComponents(
+  const claimButton =
+    new ButtonBuilder()
+      .setCustomId("claim_ticket")
+      .setLabel(
+        claimed
+          ? "تم استلام التكت"
+          : "استلام التكت"
+      )
+      .setEmoji("🎫")
+      .setStyle(ButtonStyle.Success)
+      .setDisabled(claimed);
 
-      new ButtonBuilder()
-        .setCustomId(
-          "proof"
-        )
-        .setLabel(
-          "إرسال إثبات الدفع"
-        )
-        .setEmoji("📤")
-        .setStyle(
-          ButtonStyle.Primary
-        ),
+  return [
 
-      new ButtonBuilder()
-        .setCustomId(
-          "approve"
-        )
-        .setLabel(
-          "تأكيد الدفع"
-        )
-        .setEmoji("✅")
-        .setStyle(
-          ButtonStyle.Success
-        ),
+    new ActionRowBuilder().addComponents(
+      claimButton,
 
       new ButtonBuilder()
-        .setCustomId(
-          "reject"
-        )
-        .setLabel(
-          "رفض الإثبات"
-        )
-        .setEmoji("❌")
-        .setStyle(
-          ButtonStyle.Danger
-        ),
+        .setCustomId("rename_ticket")
+        .setLabel("تغيير الاسم")
+        .setEmoji("✏️")
+        .setStyle(ButtonStyle.Secondary),
 
       new ButtonBuilder()
-        .setCustomId(
-          "close_order"
-        )
-        .setLabel(
-          "إغلاق الطلب"
-        )
+        .setCustomId("add_ticket_member")
+        .setLabel("إضافة عضو")
+        .setEmoji("👤")
+        .setStyle(ButtonStyle.Primary)
+    ),
+
+    new ActionRowBuilder().addComponents(
+
+      new ButtonBuilder()
+        .setCustomId("ticket_payment")
+        .setLabel("بيانات التحويل")
+        .setEmoji("💳")
+        .setStyle(ButtonStyle.Success),
+
+      new ButtonBuilder()
+        .setCustomId("close_ticket")
+        .setLabel("إغلاق التكت")
         .setEmoji("🔒")
-        .setStyle(
-          ButtonStyle.Secondary
-        )
+        .setStyle(ButtonStyle.Danger),
 
-    );
+      new ButtonBuilder()
+        .setCustomId("delete_ticket")
+        .setLabel("حذف التكت")
+        .setEmoji("🗑️")
+        .setStyle(ButtonStyle.Secondary)
+
+    ),
+
+  ];
 }
 
 // ==================================================
-// TICKET BUTTON
+// CREATE TICKET
 // ==================================================
 
-function ticketButton() {
+async function createTicket(
+  interaction,
+  type
+) {
 
-  return new ActionRowBuilder()
-    .addComponents(
+  const existing = interaction.guild.channels.cache.find(
+    channel =>
+      channel.topic &&
+      channel.topic.includes(
+        `TICKET_OWNER:${interaction.user.id}`
+      )
+  );
 
-      new ButtonBuilder()
-        .setCustomId(
-          "open_ticket"
-        )
-        .setLabel(
-          "فتح تكت"
-        )
-        .setEmoji("🎫")
-        .setStyle(
-          ButtonStyle.Primary
-        )
+  if (existing) {
+    return interaction.reply({
+      content:
+        `🎫 عندك تكت مفتوح بالفعل: ${existing}`,
+      ephemeral: true,
+    });
+  }
 
-    );
-}
+  const typeName =
+    type === "purchase"
+      ? "شراء"
+      : "دعم";
 
-// ==================================================
-// CLOSE TICKET BUTTON
-// ==================================================
+  const channelName =
+    `${type === "purchase" ? "purchase" : "support"}-${interaction.user.username}`
+      .toLowerCase()
+      .replace(/[^a-z0-9-_]/g, "")
+      .slice(0, 20);
 
-function closeTicketButton() {
+  const overwrites = [
 
-  return new ActionRowBuilder()
-    .addComponents(
+    {
+      id:
+        interaction.guild.roles.everyone.id,
 
-      new ButtonBuilder()
-        .setCustomId(
-          "close_ticket"
-        )
-        .setLabel(
-          "إغلاق التكت"
-        )
-        .setEmoji("🔒")
-        .setStyle(
-          ButtonStyle.Danger
-        )
+      deny: [
+        PermissionFlagsBits.ViewChannel,
+      ],
+    },
 
-    );
+    {
+      id: interaction.user.id,
+
+      allow: [
+        PermissionFlagsBits.ViewChannel,
+        PermissionFlagsBits.SendMessages,
+        PermissionFlagsBits.ReadMessageHistory,
+        PermissionFlagsBits.AttachFiles,
+      ],
+    },
+
+  ];
+
+  if (env.STAFF_ROLE_ID) {
+
+    overwrites.push({
+
+      id: env.STAFF_ROLE_ID,
+
+      allow: [
+        PermissionFlagsBits.ViewChannel,
+        PermissionFlagsBits.SendMessages,
+        PermissionFlagsBits.ReadMessageHistory,
+        PermissionFlagsBits.AttachFiles,
+        PermissionFlagsBits.ManageChannels,
+      ],
+
+    });
+
+  }
+
+  const channel =
+    await interaction.guild.channels.create({
+
+      name:
+        channelName ||
+        `ticket-${interaction.user.id}`,
+
+      type:
+        ChannelType.GuildText,
+
+      parent:
+        env.TICKET_CATEGORY_ID || null,
+
+      topic:
+        `TICKET_OWNER:${interaction.user.id} | TYPE:${type}`,
+
+      permissionOverwrites:
+        overwrites,
+
+    });
+
+  const ticketEmbed =
+    new EmbedBuilder()
+      .setTitle(
+        type === "purchase"
+          ? "🛒 تكت شراء"
+          : "📞 تكت دعم فني"
+      )
+      .setDescription(
+
+        `أهلًا <@${interaction.user.id}> 👋\n\n` +
+
+        (
+          type === "purchase"
+            ? "اكتب المنتج الذي تريده وسيتم مساعدتك في إتمام الطلب."
+            : "اكتب مشكلتك أو استفسارك وسيتم الرد عليك من الإدارة."
+        ) +
+
+        "\n\n" +
+
+        "━━━━━━━━━━━━━━━━━━━━\n\n" +
+
+        "🎫 **استلام التكت**\n" +
+        "يمكن لأحد أعضاء الإدارة استلام التكت.\n\n" +
+
+        "💳 **بيانات التحويل**\n" +
+        "اضغط الزر لعرض بيانات الراجحي والآيبان.\n\n" +
+
+        "🔒 **إغلاق التكت**\n" +
+        "إغلاق التكت عند الانتهاء."
+
+      )
+      .setFooter({
+        text:
+          `نوع التكت: ${typeName} • لم يتم استلامه بعد`,
+      });
+
+  const message =
+    await channel.send({
+
+      content:
+        `<@${interaction.user.id}>` +
+
+        (
+          env.STAFF_ROLE_ID
+            ? ` <@&${env.STAFF_ROLE_ID}>`
+            : ""
+        ),
+
+      embeds: [
+        ticketEmbed,
+      ],
+
+      components:
+        ticketControlButtons(false),
+
+    });
+
+  // منع حذف رسالة التكت الأصلية بالخطأ
+  channel.ticketMessageId = message.id;
+
+  return interaction.reply({
+
+    content:
+      `✅ تم إنشاء التكت: ${channel}`,
+
+    ephemeral: true,
+
+  });
 }
 
 // ==================================================
 // READY
 // ==================================================
 
-client.once(
-  "ready",
-  async () => {
+client.once("ready", async () => {
 
-    console.log(
-      `✅ Logged in as ${client.user.tag}`
-    );
+  console.log(
+    `✅ Logged in as ${client.user.tag}`
+  );
 
-    try {
+  try {
 
-      const rest =
-        new REST({
-          version: "10",
-        })
-        .setToken(
-          env.DISCORD_TOKEN
-        );
-
-      await rest.put(
-
-        Routes.applicationGuildCommands(
-          client.user.id,
-          env.GUILD_ID
-        ),
-
-        {
-          body:
-            commands,
-        }
-
+    const rest =
+      new REST({
+        version: "10",
+      }).setToken(
+        env.DISCORD_TOKEN
       );
 
-      console.log(
-        "✅ جميع الأوامر تسجلت بنجاح"
-      );
+    await rest.put(
 
-    } catch (error) {
+      Routes.applicationGuildCommands(
+        client.user.id,
+        env.GUILD_ID
+      ),
 
-      console.error(
-        "❌ خطأ تسجيل الأوامر:",
-        error
-      );
-
-    }
-
-    // ==================================================
-    // RESTORE 24/7
-    // ==================================================
-
-    try {
-
-      const data =
-        get247();
-
-      const guild =
-        client.guilds.cache.get(
-          env.GUILD_ID
-        );
-
-      if (
-        guild &&
-        data[guild.id]
-      ) {
-
-        console.log(
-          "🔄 استعادة اتصال 24/7..."
-        );
-
-        setTimeout(() => {
-
-          connect247(
-            guild
-          ).catch(
-            console.error
-          );
-
-        }, 3000);
-
+      {
+        body: commands,
       }
 
-    } catch (error) {
+    );
 
-      console.error(
-        "❌ خطأ استعادة 24/7:",
-        error
-      );
+    console.log(
+      "✅ جميع الأوامر تسجلت بنجاح"
+    );
 
-    }
+  } catch (error) {
+
+    console.error(
+      "❌ خطأ تسجيل الأوامر:",
+      error
+    );
 
   }
-);
+
+  // دخول روم 24/7 تلقائيًا
+  if (env.VOICE_247_CHANNEL_ID) {
+    setTimeout(() => {
+      connect247().catch(console.error);
+    }, 3000);
+  }
+
+});
 
 // ==================================================
 // INTERACTIONS
@@ -1070,29 +946,20 @@ client.on(
       // SLASH COMMANDS
       // ==================================================
 
-      if (
-        interaction.isChatInputCommand()
-      ) {
+      if (interaction.isChatInputCommand()) {
 
         // ==================================================
         // STORE
         // ==================================================
 
         if (
-          interaction.commandName ===
-            "store" ||
-
-          interaction.commandName ===
-            "setup"
+          interaction.commandName === "store" ||
+          interaction.commandName === "setup"
         ) {
 
           if (
-            interaction.commandName ===
-              "setup" &&
-
-            !isStaff(
-              interaction
-            )
+            interaction.commandName === "setup" &&
+            !isStaff(interaction)
           ) {
 
             return interaction.reply({
@@ -1100,8 +967,7 @@ client.on(
               content:
                 "❌ هذا الأمر للإدارة فقط.",
 
-              ephemeral:
-                true,
+              ephemeral: true,
 
             });
 
@@ -1127,12 +993,46 @@ client.on(
         }
 
         // ==================================================
+        // TICKET PANEL
+        // ==================================================
+
+        if (
+          interaction.commandName === "ticket"
+        ) {
+
+          if (!isStaff(interaction)) {
+
+            return interaction.reply({
+
+              content:
+                "❌ هذا الأمر للإدارة فقط.",
+
+              ephemeral: true,
+
+            });
+
+          }
+
+          return interaction.reply({
+
+            embeds: [
+              ticketPanelEmbed(),
+            ],
+
+            components: [
+              ticketPanelButtons(),
+            ],
+
+          });
+
+        }
+
+        // ==================================================
         // PRODUCTS
         // ==================================================
 
         if (
-          interaction.commandName ===
-          "products"
+          interaction.commandName === "products"
         ) {
 
           const products =
@@ -1145,44 +1045,30 @@ client.on(
               content:
                 "📦 لا توجد منتجات.",
 
-              ephemeral:
-                true,
+              ephemeral: true,
 
             });
 
           }
 
           const text =
-            products.map(
-              p =>
-
-                `📦 **${p.name}**\n` +
-
-                `🆔 \`${p.id}\`\n` +
-
-                `💰 ${p.price} ريال\n` +
-
-                `📊 المخزون: ${p.stock}\n` +
-
-                `📝 ${
-                  p.description ||
-                  "بدون وصف"
-                }`
-
-            ).join(
-              "\n\n"
-            );
+            products
+              .map(
+                p =>
+                  `📦 **${p.name}**\n` +
+                  `🆔 \`${p.id}\`\n` +
+                  `💰 ${p.price} ريال\n` +
+                  `📊 المخزون: ${p.stock}\n` +
+                  `📝 ${p.description || "بدون وصف"}`
+              )
+              .join("\n\n");
 
           return interaction.reply({
 
             content:
-              text.slice(
-                0,
-                4000
-              ),
+              text.slice(0, 4000),
 
-            ephemeral:
-              true,
+            ephemeral: true,
 
           });
 
@@ -1193,51 +1079,41 @@ client.on(
         // ==================================================
 
         if (
-          interaction.commandName ===
-          "addproduct"
+          interaction.commandName === "addproduct"
         ) {
 
-          if (
-            !isStaff(
-              interaction
-            )
-          ) {
+          if (!isStaff(interaction)) {
 
             return interaction.reply({
 
               content:
                 "❌ للإدارة فقط.",
 
-              ephemeral:
-                true,
+              ephemeral: true,
 
             });
 
           }
 
           const name =
-            interaction.options
-              .getString(
-                "name"
-              );
+            interaction.options.getString(
+              "name"
+            );
 
           const price =
-            interaction.options
-              .getNumber(
-                "price"
-              );
+            interaction.options.getNumber(
+              "price"
+            );
 
           const stock =
-            interaction.options
-              .getInteger(
-                "stock"
-              );
+            interaction.options.getInteger(
+              "stock"
+            );
 
           const description =
-            interaction.options
-              .getString(
-                "description"
-              ) ||
+            interaction.options.getString(
+              "description"
+            ) ||
             "بدون وصف";
 
           const products =
@@ -1246,54 +1122,32 @@ client.on(
           const product = {
 
             id:
-              Date.now()
-                .toString(36) +
-
+              Date.now().toString(36) +
               Math.random()
                 .toString(36)
-                .substring(
-                  2,
-                  6
-                ),
+                .substring(2, 6),
 
-            name:
-              name,
-
-            price:
-              price,
-
-            stock:
-              stock,
-
-            description:
-              description,
+            name,
+            price,
+            stock,
+            description,
 
           };
 
-          products.push(
-            product
-          );
+          products.push(product);
 
-          saveProducts(
-            products
-          );
+          saveProducts(products);
 
           return interaction.reply({
 
             content:
-
               `✅ تم إضافة المنتج\n\n` +
-
               `📦 ${name}\n` +
-
               `💰 ${price} ريال\n` +
-
               `📊 ${stock}\n` +
-
               `🆔 \`${product.id}\``,
 
-            ephemeral:
-              true,
+            ephemeral: true,
 
           });
 
@@ -1304,76 +1158,59 @@ client.on(
         // ==================================================
 
         if (
-          interaction.commandName ===
-          "removeproduct"
+          interaction.commandName === "removeproduct"
         ) {
 
-          if (
-            !isStaff(
-              interaction
-            )
-          ) {
+          if (!isStaff(interaction)) {
 
             return interaction.reply({
 
               content:
                 "❌ للإدارة فقط.",
 
-              ephemeral:
-                true,
+              ephemeral: true,
 
             });
 
           }
 
           const id =
-            interaction.options
-              .getString(
-                "id"
-              );
+            interaction.options.getString(
+              "id"
+            );
 
           const products =
             getProducts();
 
           const index =
             products.findIndex(
-              p =>
-                p.id === id
+              p => p.id === id
             );
 
-          if (
-            index === -1
-          ) {
+          if (index === -1) {
 
             return interaction.reply({
 
               content:
                 "❌ المنتج غير موجود.",
 
-              ephemeral:
-                true,
+              ephemeral: true,
 
             });
 
           }
 
           const removed =
-            products.splice(
-              index,
-              1
-            )[0];
+            products.splice(index, 1)[0];
 
-          saveProducts(
-            products
-          );
+          saveProducts(products);
 
           return interaction.reply({
 
             content:
               `🗑️ تم حذف **${removed.name}**`,
 
-            ephemeral:
-              true,
+            ephemeral: true,
 
           });
 
@@ -1384,41 +1221,33 @@ client.on(
         // ==================================================
 
         if (
-          interaction.commandName ===
-          "editproduct"
+          interaction.commandName === "editproduct"
         ) {
 
-          if (
-            !isStaff(
-              interaction
-            )
-          ) {
+          if (!isStaff(interaction)) {
 
             return interaction.reply({
 
               content:
                 "❌ للإدارة فقط.",
 
-              ephemeral:
-                true,
+              ephemeral: true,
 
             });
 
           }
 
           const id =
-            interaction.options
-              .getString(
-                "id"
-              );
+            interaction.options.getString(
+              "id"
+            );
 
           const products =
             getProducts();
 
           const product =
             products.find(
-              p =>
-                p.id === id
+              p => p.id === id
             );
 
           if (!product) {
@@ -1428,91 +1257,56 @@ client.on(
               content:
                 "❌ المنتج غير موجود.",
 
-              ephemeral:
-                true,
+              ephemeral: true,
 
             });
 
           }
 
           const name =
-            interaction.options
-              .getString(
-                "name"
-              );
+            interaction.options.getString(
+              "name"
+            );
 
           const price =
-            interaction.options
-              .getNumber(
-                "price"
-              );
+            interaction.options.getNumber(
+              "price"
+            );
 
           const stock =
-            interaction.options
-              .getInteger(
-                "stock"
-              );
+            interaction.options.getInteger(
+              "stock"
+            );
 
           const description =
-            interaction.options
-              .getString(
-                "description"
-              );
+            interaction.options.getString(
+              "description"
+            );
 
-          if (
-            name !== null
-          ) {
+          if (name !== null)
+            product.name = name;
 
-            product.name =
-              name;
+          if (price !== null)
+            product.price = price;
 
-          }
+          if (stock !== null)
+            product.stock = stock;
 
-          if (
-            price !== null
-          ) {
-
-            product.price =
-              price;
-
-          }
-
-          if (
-            stock !== null
-          ) {
-
-            product.stock =
-              stock;
-
-          }
-
-          if (
-            description !== null
-          ) {
-
+          if (description !== null)
             product.description =
               description;
 
-          }
-
-          saveProducts(
-            products
-          );
+          saveProducts(products);
 
           return interaction.reply({
 
             content:
-
               `✅ تم تعديل المنتج\n\n` +
-
               `📦 ${product.name}\n` +
-
               `💰 ${product.price} ريال\n` +
-
               `📊 ${product.stock}`,
 
-            ephemeral:
-              true,
+            ephemeral: true,
 
           });
 
@@ -1523,23 +1317,17 @@ client.on(
         // ==================================================
 
         if (
-          interaction.commandName ===
-          "stock"
+          interaction.commandName === "stock"
         ) {
 
-          if (
-            !isStaff(
-              interaction
-            )
-          ) {
+          if (!isStaff(interaction)) {
 
             return interaction.reply({
 
               content:
                 "❌ للإدارة فقط.",
 
-              ephemeral:
-                true,
+              ephemeral: true,
 
             });
 
@@ -1555,316 +1343,104 @@ client.on(
               content:
                 "📦 لا توجد منتجات.",
 
-              ephemeral:
-                true,
+              ephemeral: true,
 
             });
 
           }
 
           const text =
-            products.map(
-              p =>
-
-                `📦 **${p.name}** — ${p.stock} قطعة\n` +
-
-                `🆔 \`${p.id}\``
-
-            ).join(
-              "\n\n"
-            );
+            products
+              .map(
+                p =>
+                  `📦 **${p.name}** — ${p.stock} قطعة\n` +
+                  `🆔 \`${p.id}\``
+              )
+              .join("\n\n");
 
           return interaction.reply({
 
             content:
               `📊 **مخزون المتجر**\n\n${text}`,
 
-            ephemeral:
-              true,
+            ephemeral: true,
 
           });
 
         }
 
         // ==================================================
-        // TICKET
+        // 24/7
         // ==================================================
 
         if (
-          interaction.commandName ===
-          "ticket"
+          interaction.commandName === "247"
         ) {
 
-          return interaction.reply({
-
-            embeds: [
-
-              new EmbedBuilder()
-
-                .setTitle(
-                  "🎫 الدعم الفني"
-                )
-
-                .setDescription(
-                  "اضغط الزر لفتح تكت خاص مع الإدارة."
-                ),
-
-            ],
-
-            components: [
-              ticketButton(),
-            ],
-
-          });
-
-        }
-
-        // ==================================================
-        // CLOSE TICKET
-        // ==================================================
-
-        if (
-          interaction.commandName ===
-          "close"
-        ) {
-
-          if (
-            !interaction.channel ||
-            !interaction.channel.name ||
-            !interaction.channel.name.startsWith(
-              "ticket-"
-            )
-          ) {
+          if (!isStaff(interaction)) {
 
             return interaction.reply({
 
               content:
-                "❌ هذا الأمر يستخدم داخل التكت فقط.",
+                "❌ هذا الأمر للإدارة فقط.",
 
-              ephemeral:
-                true,
+              ephemeral: true,
 
             });
 
           }
 
-          const ticketOwnerId =
-            interaction.channel.name
-              .replace(
-                "ticket-",
-                ""
-              );
-
-          const isOwner =
-            interaction.user.id ===
-            ticketOwnerId;
-
-          const staff =
-            isStaff(
-              interaction
-            );
-
-          if (
-            !isOwner &&
-            !staff
-          ) {
+          if (!env.VOICE_247_CHANNEL_ID) {
 
             return interaction.reply({
 
               content:
-                "❌ ما تقدر تقفل هذا التكت.",
+                "❌ ما حددت VOICE_247_CHANNEL_ID في Variables.",
 
-              ephemeral:
-                true,
+              ephemeral: true,
 
             });
 
           }
 
-          await interaction.reply(
-            "🔒 سيتم إغلاق التكت خلال 5 ثوانٍ."
+          await connect247();
+
+          return interaction.reply(
+            "🔊 تم تشغيل نظام 24/7."
           );
 
-          setTimeout(() => {
-
-            if (
-              interaction.channel &&
-              interaction.channel.deletable
-            ) {
-
-              interaction.channel
-                .delete()
-                .catch(
-                  () => {}
-                );
-
-            }
-
-          }, 5000);
-
-          return;
-
         }
 
-        // ==================================================
-        // BAN
-        // ==================================================
-
         if (
-          interaction.commandName ===
-          "ban"
+          interaction.commandName === "247stop"
         ) {
 
-          if (
-            !interaction.member.permissions.has(
-              PermissionFlagsBits.BanMembers
-            )
-          ) {
+          if (!isStaff(interaction)) {
 
             return interaction.reply({
 
               content:
-                "❌ ما عندك صلاحية الحظر.",
+                "❌ هذا الأمر للإدارة فقط.",
 
-              ephemeral:
-                true,
+              ephemeral: true,
 
             });
 
           }
 
-          const user =
-            interaction.options
-              .getUser(
-                "user"
-              );
+          if (voice247Connection) {
 
-          const reason =
-            interaction.options
-              .getString(
-                "reason"
-              ) ||
-            "بدون سبب";
+            try {
+              voice247Connection.destroy();
+            } catch {}
 
-          try {
-
-            await interaction.guild.members.ban(
-
-              user.id,
-
-              {
-                reason:
-                  reason,
-              }
-
-            );
-
-            return interaction.reply(
-              `🔨 تم حظر **${user.tag}**\nالسبب: ${reason}`
-            );
-
-          } catch {
-
-            return interaction.reply({
-
-              content:
-                "❌ ما قدرت أحظر العضو. تأكد من ترتيب الرتب والصلاحيات.",
-
-              ephemeral:
-                true,
-
-            });
+            voice247Connection = null;
 
           }
 
-        }
-
-        // ==================================================
-        // KICK
-        // ==================================================
-
-        if (
-          interaction.commandName ===
-          "kick"
-        ) {
-
-          if (
-            !interaction.member.permissions.has(
-              PermissionFlagsBits.KickMembers
-            )
-          ) {
-
-            return interaction.reply({
-
-              content:
-                "❌ ما عندك صلاحية الطرد.",
-
-              ephemeral:
-                true,
-
-            });
-
-          }
-
-          const user =
-            interaction.options
-              .getUser(
-                "user"
-              );
-
-          const reason =
-            interaction.options
-              .getString(
-                "reason"
-              ) ||
-            "بدون سبب";
-
-          const member =
-            await interaction.guild.members
-              .fetch(
-                user.id
-              )
-              .catch(
-                () => null
-              );
-
-          if (!member) {
-
-            return interaction.reply({
-
-              content:
-                "❌ العضو غير موجود في السيرفر.",
-
-              ephemeral:
-                true,
-
-            });
-
-          }
-
-          try {
-
-            await member.kick(
-              reason
-            );
-
-            return interaction.reply(
-              `👢 تم طرد **${user.tag}**\nالسبب: ${reason}`
-            );
-
-          } catch {
-
-            return interaction.reply({
-
-              content:
-                "❌ ما قدرت أطرد العضو.",
-
-              ephemeral:
-                true,
-
-            });
-
-          }
+          return interaction.reply(
+            "🔇 تم إخراج البوت من روم 24/7."
+          );
 
         }
 
@@ -1873,8 +1449,7 @@ client.on(
         // ==================================================
 
         if (
-          interaction.commandName ===
-          "play"
+          interaction.commandName === "play"
         ) {
 
           const voiceChannel =
@@ -1887,18 +1462,16 @@ client.on(
               content:
                 "❌ ادخل روم صوتي أولاً.",
 
-              ephemeral:
-                true,
+              ephemeral: true,
 
             });
 
           }
 
           const query =
-            interaction.options
-              .getString(
-                "song"
-              );
+            interaction.options.getString(
+              "song"
+            );
 
           await interaction.deferReply();
 
@@ -1907,19 +1480,13 @@ client.on(
             let result;
 
             if (
-              play.yt_validate(
-                query
-              ) === "video"
+              play.yt_validate(query) ===
+              "video"
             ) {
 
               result = {
-
-                url:
-                  query,
-
-                title:
-                  "YouTube",
-
+                url: query,
+                title: "YouTube",
               };
 
             } else {
@@ -1928,19 +1495,14 @@ client.on(
                 await play.search(
                   query,
                   {
-                    limit:
-                      1,
-
+                    limit: 1,
                     source: {
-                      youtube:
-                        "video",
+                      youtube: "video",
                     },
                   }
                 );
 
-              if (
-                !search.length
-              ) {
+              if (!search.length) {
 
                 return interaction.editReply(
                   "❌ ما لقيت الأغنية."
@@ -1965,9 +1527,7 @@ client.on(
                 interaction.guild.id
               );
 
-            if (
-              !queue.connection
-            ) {
+            if (!queue.connection) {
 
               queue.connection =
                 joinVoiceChannel({
@@ -1982,69 +1542,17 @@ client.on(
                     interaction.guild
                       .voiceAdapterCreator,
 
-                  selfDeaf:
-                    true,
-
-                  selfMute:
-                    true,
-
                 });
 
               queue.connection.subscribe(
                 queue.player
               );
 
-              if (
-                !queue.listenerAdded
-              ) {
-
-                queue.listenerAdded =
-                  true;
-
-                queue.player.on(
-                  AudioPlayerStatus.Idle,
-                  () => {
-
-                    if (
-                      queue.songs.length
-                    ) {
-
-                      queue.songs.shift();
-
-                    }
-
-                    if (
-                      queue.songs.length
-                    ) {
-
-                      playNext(
-                        interaction.guild
-                      )
-                      .catch(
-                        console.error
-                      );
-
-                    } else {
-
-                      queue.playing =
-                        false;
-
-                    }
-
-                  }
-                );
-
-              }
-
             }
 
-            queue.songs.push(
-              result
-            );
+            queue.songs.push(result);
 
-            if (
-              !queue.playing
-            ) {
+            if (!queue.playing) {
 
               await playNext(
                 interaction.guild
@@ -2058,9 +1566,7 @@ client.on(
 
           } catch (error) {
 
-            console.error(
-              error
-            );
+            console.error(error);
 
             return interaction.editReply(
               "❌ حصل خطأ أثناء تشغيل الأغنية."
@@ -2075,8 +1581,7 @@ client.on(
         // ==================================================
 
         if (
-          interaction.commandName ===
-          "skip"
+          interaction.commandName === "skip"
         ) {
 
           const queue =
@@ -2108,8 +1613,7 @@ client.on(
         // ==================================================
 
         if (
-          interaction.commandName ===
-          "stop"
+          interaction.commandName === "stop"
         ) {
 
           const queue =
@@ -2125,24 +1629,21 @@ client.on(
 
           }
 
-          queue.songs =
-            [];
+          queue.songs = [];
 
           queue.player.stop();
 
-          if (
-            queue.connection
-          ) {
+          if (queue.connection) {
 
-            queue.connection.destroy();
+            try {
+              queue.connection.destroy();
+            } catch {}
 
-            queue.connection =
-              null;
+            queue.connection = null;
 
           }
 
-          queue.playing =
-            false;
+          queue.playing = false;
 
           return interaction.reply(
             "⏹️ تم إيقاف الموسيقى."
@@ -2155,8 +1656,7 @@ client.on(
         // ==================================================
 
         if (
-          interaction.commandName ===
-          "pause"
+          interaction.commandName === "pause"
         ) {
 
           const queue =
@@ -2185,8 +1685,7 @@ client.on(
         // ==================================================
 
         if (
-          interaction.commandName ===
-          "resume"
+          interaction.commandName === "resume"
         ) {
 
           const queue =
@@ -2215,8 +1714,7 @@ client.on(
         // ==================================================
 
         if (
-          interaction.commandName ===
-          "queue"
+          interaction.commandName === "queue"
         ) {
 
           const queue =
@@ -2238,199 +1736,14 @@ client.on(
           const text =
             queue.songs
               .map(
-                (
-                  song,
-                  index
-                ) =>
+                (song, index) =>
                   `${index + 1}. ${song.title}`
               )
-              .join(
-                "\n"
-              );
+              .join("\n");
 
           return interaction.reply(
             `🎵 **قائمة الأغاني**\n\n${text}`
           );
-
-        }
-
-        // ==================================================
-        // 247
-        // ==================================================
-
-        if (
-          interaction.commandName ===
-          "247"
-        ) {
-
-          if (
-            !isStaff(
-              interaction
-            )
-          ) {
-
-            return interaction.reply({
-
-              content:
-                "❌ هذا الأمر للإدارة فقط.",
-
-              ephemeral:
-                true,
-
-            });
-
-          }
-
-          const voiceChannel =
-            interaction.member.voice.channel;
-
-          if (!voiceChannel) {
-
-            return interaction.reply({
-
-              content:
-                "❌ ادخل الروم الصوتي أولاً.",
-
-              ephemeral:
-                true,
-
-            });
-
-          }
-
-          if (
-            voiceChannel.type !==
-            ChannelType.GuildVoice
-          ) {
-
-            return interaction.reply({
-
-              content:
-                "❌ هذا ليس روم صوتي.",
-
-              ephemeral:
-                true,
-
-            });
-
-          }
-
-          const data =
-            get247();
-
-          data[
-            interaction.guild.id
-          ] =
-            voiceChannel.id;
-
-          save247(
-            data
-          );
-
-          const connected =
-            await connect247(
-              interaction.guild
-            );
-
-          if (!connected) {
-
-            return interaction.reply({
-
-              content:
-                "❌ ما قدرت أدخل الروم الصوتي.",
-
-              ephemeral:
-                true,
-
-            });
-
-          }
-
-          return interaction.reply({
-
-            content:
-
-              `🔊 تم تشغيل وضع **24/7**.\n\n` +
-
-              `📍 الروم: **${voiceChannel.name}**\n` +
-
-              `♾️ سيبقى البوت في الروم حتى تستخدم \`/247off\`.`,
-
-            ephemeral:
-              true,
-
-          });
-
-        }
-
-        // ==================================================
-        // 247 OFF
-        // ==================================================
-
-        if (
-          interaction.commandName ===
-          "247off"
-        ) {
-
-          if (
-            !isStaff(
-              interaction
-            )
-          ) {
-
-            return interaction.reply({
-
-              content:
-                "❌ هذا الأمر للإدارة فقط.",
-
-              ephemeral:
-                true,
-
-            });
-
-          }
-
-          const data =
-            get247();
-
-          delete data[
-            interaction.guild.id
-          ];
-
-          save247(
-            data
-          );
-
-          const queue =
-            musicQueues.get(
-              interaction.guild.id
-            );
-
-          if (
-            queue &&
-            queue.connection
-          ) {
-
-            try {
-
-              queue.connection.destroy();
-
-            } catch {}
-
-            queue.connection =
-              null;
-
-          }
-
-          return interaction.reply({
-
-            content:
-              "🔇 تم إيقاف وضع **24/7** وإخراج البوت من الروم.",
-
-            ephemeral:
-              true,
-
-          });
 
         }
 
@@ -2450,18 +1763,14 @@ client.on(
         const productId =
           interaction.values[0];
 
-        if (
-          productId ===
-          "none"
-        ) {
+        if (productId === "none") {
 
           return interaction.reply({
 
             content:
               "❌ لا توجد منتجات.",
 
-            ephemeral:
-              true,
+            ephemeral: true,
 
           });
 
@@ -2472,9 +1781,7 @@ client.on(
 
         const product =
           products.find(
-            p =>
-              p.id ===
-              productId
+            p => p.id === productId
           );
 
         if (!product) {
@@ -2484,16 +1791,14 @@ client.on(
             content:
               "❌ المنتج غير موجود.",
 
-            ephemeral:
-              true,
+            ephemeral: true,
 
           });
 
         }
 
         if (
-          Number(product.stock) <=
-          0
+          Number(product.stock) <= 0
         ) {
 
           return interaction.reply({
@@ -2501,16 +1806,14 @@ client.on(
             content:
               "❌ المنتج نفد من المخزون.",
 
-            ephemeral:
-              true,
+            ephemeral: true,
 
           });
 
         }
 
         await interaction.deferReply({
-          ephemeral:
-            true,
+          ephemeral: true,
         });
 
         const username =
@@ -2520,30 +1823,24 @@ client.on(
               /[^a-z0-9-_]/g,
               ""
             )
-            .slice(
-              0,
-              18
-            ) ||
+            .slice(0, 18) ||
           "customer";
 
         const channelName =
           `order-${username}-${Date.now()
             .toString()
-            .slice(
-              -4
-            )}`;
+            .slice(-4)}`;
 
         const overwrites = [
 
           {
             id:
-              interaction.guild
-                .roles.everyone.id,
+              interaction.guild.roles
+                .everyone.id,
 
             deny: [
               PermissionFlagsBits.ViewChannel,
             ],
-
           },
 
           {
@@ -2556,14 +1853,11 @@ client.on(
               PermissionFlagsBits.ReadMessageHistory,
               PermissionFlagsBits.AttachFiles,
             ],
-
           },
 
         ];
 
-        if (
-          env.STAFF_ROLE_ID
-        ) {
+        if (env.STAFF_ROLE_ID) {
 
           overwrites.push({
 
@@ -2575,7 +1869,6 @@ client.on(
               PermissionFlagsBits.SendMessages,
               PermissionFlagsBits.ReadMessageHistory,
               PermissionFlagsBits.ManageChannels,
-              PermissionFlagsBits.AttachFiles,
             ],
 
           });
@@ -2610,13 +1903,9 @@ client.on(
             .setDescription(
 
               `**العميل:** <@${interaction.user.id}>\n` +
-
               `**المنتج:** ${product.name}\n` +
-
               `**السعر:** ${product.price} ريال\n` +
-
               `**المخزون:** ${product.stock}\n` +
-
               `**الحالة:** 🟡 بانتظار الدفع`
 
             );
@@ -2624,7 +1913,6 @@ client.on(
         await channel.send({
 
           content:
-
             `<@${interaction.user.id}>` +
 
             (
@@ -2635,13 +1923,52 @@ client.on(
 
           embeds: [
             orderEmbed,
-            paymentEmbed(
-              product
-            ),
+            paymentEmbed(product),
           ],
 
           components: [
-            orderButtons(),
+
+            new ActionRowBuilder()
+              .addComponents(
+
+                new ButtonBuilder()
+                  .setCustomId(
+                    "approve_order"
+                  )
+                  .setLabel(
+                    "تأكيد الدفع"
+                  )
+                  .setEmoji("✅")
+                  .setStyle(
+                    ButtonStyle.Success
+                  ),
+
+                new ButtonBuilder()
+                  .setCustomId(
+                    "reject_order"
+                  )
+                  .setLabel(
+                    "رفض الإثبات"
+                  )
+                  .setEmoji("❌")
+                  .setStyle(
+                    ButtonStyle.Danger
+                  ),
+
+                new ButtonBuilder()
+                  .setCustomId(
+                    "close_order"
+                  )
+                  .setLabel(
+                    "إغلاق الطلب"
+                  )
+                  .setEmoji("🔒")
+                  .setStyle(
+                    ButtonStyle.Secondary
+                  )
+
+              ),
+
           ],
 
         });
@@ -2659,56 +1986,497 @@ client.on(
       // BUTTONS
       // ==================================================
 
-      if (
-        interaction.isButton()
-      ) {
+      if (interaction.isButton()) {
 
         // ==================================================
-        // PROOF
+        // CREATE PURCHASE TICKET
         // ==================================================
 
         if (
           interaction.customId ===
-          "proof"
+          "create_purchase_ticket"
         ) {
+
+          return createTicket(
+            interaction,
+            "purchase"
+          );
+
+        }
+
+        // ==================================================
+        // CREATE SUPPORT TICKET
+        // ==================================================
+
+        if (
+          interaction.customId ===
+          "create_support_ticket"
+        ) {
+
+          return createTicket(
+            interaction,
+            "support"
+          );
+
+        }
+
+        // ==================================================
+        // CLAIM TICKET
+        // ==================================================
+
+        if (
+          interaction.customId ===
+          "claim_ticket"
+        ) {
+
+          if (!isStaff(interaction)) {
+
+            return interaction.reply({
+
+              content:
+                "❌ استلام التكت للإدارة فقط.",
+
+              ephemeral: true,
+
+            });
+
+          }
+
+          const topic =
+            interaction.channel.topic || "";
+
+          if (
+            topic.includes("CLAIMED_BY:")
+          ) {
+
+            return interaction.reply({
+
+              content:
+                "❌ هذا التكت مستلم من إداري آخر.",
+
+              ephemeral: true,
+
+            });
+
+          }
+
+          await interaction.channel.setTopic(
+            `${topic} | CLAIMED_BY:${interaction.user.id}`
+          );
+
+          const messages =
+            await interaction.channel.messages.fetch({
+              limit: 20,
+            });
+
+          const ticketMessage =
+            messages.find(
+              m =>
+                m.author.id ===
+                  client.user.id &&
+                m.components.length > 0
+            );
+
+          if (ticketMessage) {
+
+            const embeds =
+              ticketMessage.embeds;
+
+            const oldEmbed =
+              embeds[0];
+
+            const newEmbed =
+              EmbedBuilder.from(
+                oldEmbed
+              )
+              .setFooter({
+
+                text:
+                  `تم استلام التكت بواسطة ${interaction.user.tag}`,
+
+              });
+
+            await ticketMessage.edit({
+
+              embeds: [
+                newEmbed,
+              ],
+
+              components:
+                ticketControlButtons(true),
+
+            });
+
+          }
 
           return interaction.reply({
 
             content:
-
-              "📤 ارفع صورة أو ملف إثبات التحويل في هذه القناة.\n\n" +
-
-              "بعد رفع الإثبات انتظر الإدارة لمراجعته.",
-
-            ephemeral:
-              true,
+              `🎫 تم استلام التكت بواسطة <@${interaction.user.id}>.`,
 
           });
 
         }
 
         // ==================================================
-        // APPROVE
+        // RENAME TICKET
         // ==================================================
 
         if (
           interaction.customId ===
-          "approve"
+          "rename_ticket"
         ) {
 
-          if (
-            !isStaff(
-              interaction
-            )
-          ) {
+          if (!isStaff(interaction)) {
 
             return interaction.reply({
 
               content:
-                "❌ زر تأكيد الدفع للإدارة فقط.",
+                "❌ تغيير اسم التكت للإدارة فقط.",
 
-              ephemeral:
-                true,
+              ephemeral: true,
+
+            });
+
+          }
+
+          const modal =
+            new ModalBuilder()
+              .setCustomId(
+                "rename_ticket_modal"
+              )
+              .setTitle(
+                "✏️ تغيير اسم التكت"
+              );
+
+          const input =
+            new TextInputBuilder()
+              .setCustomId(
+                "new_ticket_name"
+              )
+              .setLabel(
+                "اسم التكت الجديد"
+              )
+              .setPlaceholder(
+                "مثال: طلب-امجد"
+              )
+              .setStyle(
+                TextInputStyle.Short
+              )
+              .setRequired(true)
+              .setMaxLength(80);
+
+          modal.addComponents(
+            new ActionRowBuilder()
+              .addComponents(input)
+          );
+
+          return interaction.showModal(
+            modal
+          );
+
+        }
+
+        // ==================================================
+        // ADD MEMBER
+        // ==================================================
+
+        if (
+          interaction.customId ===
+          "add_ticket_member"
+        ) {
+
+          if (!isStaff(interaction)) {
+
+            return interaction.reply({
+
+              content:
+                "❌ إضافة عضو للإدارة فقط.",
+
+              ephemeral: true,
+
+            });
+
+          }
+
+          const modal =
+            new ModalBuilder()
+              .setCustomId(
+                "add_ticket_member_modal"
+              )
+              .setTitle(
+                "👤 إضافة عضو للتكت"
+              );
+
+          const input =
+            new TextInputBuilder()
+              .setCustomId(
+                "member_id"
+              )
+              .setLabel(
+                "ID العضو"
+              )
+              .setPlaceholder(
+                "ضع Discord ID الخاص بالعضو"
+              )
+              .setStyle(
+                TextInputStyle.Short
+              )
+              .setRequired(true);
+
+          modal.addComponents(
+            new ActionRowBuilder()
+              .addComponents(input)
+          );
+
+          return interaction.showModal(
+            modal
+          );
+
+        }
+
+        // ==================================================
+        // PAYMENT
+        // ==================================================
+
+        if (
+          interaction.customId ===
+          "ticket_payment"
+        ) {
+
+          return interaction.reply({
+
+            embeds: [
+              paymentEmbed(),
+            ],
+
+            ephemeral: true,
+
+          });
+
+        }
+
+        // ==================================================
+        // CLOSE TICKET
+        // ==================================================
+
+        if (
+          interaction.customId ===
+          "close_ticket"
+        ) {
+
+          if (
+            !isStaff(interaction)
+          ) {
+
+            const topic =
+              interaction.channel.topic ||
+              "";
+
+            const ownerMatch =
+              topic.match(
+                /TICKET_OWNER:(\d+)/
+              );
+
+            if (
+              !ownerMatch ||
+              ownerMatch[1] !==
+                interaction.user.id
+            ) {
+
+              return interaction.reply({
+
+                content:
+                  "❌ فقط صاحب التكت أو الإدارة يستطيع إغلاقه.",
+
+                ephemeral: true,
+
+              });
+
+            }
+
+          }
+
+          const confirmRow =
+            new ActionRowBuilder()
+              .addComponents(
+
+                new ButtonBuilder()
+                  .setCustomId(
+                    "confirm_close_ticket"
+                  )
+                  .setLabel(
+                    "نعم، أغلق التكت"
+                  )
+                  .setEmoji("🔒")
+                  .setStyle(
+                    ButtonStyle.Danger
+                  ),
+
+                new ButtonBuilder()
+                  .setCustomId(
+                    "cancel_close_ticket"
+                  )
+                  .setLabel(
+                    "إلغاء"
+                  )
+                  .setEmoji("↩️")
+                  .setStyle(
+                    ButtonStyle.Secondary
+                  )
+
+              );
+
+          return interaction.reply({
+
+            content:
+              "⚠️ هل أنت متأكد من إغلاق التكت؟",
+
+            components: [
+              confirmRow,
+            ],
+
+          });
+
+        }
+
+        // ==================================================
+        // CONFIRM CLOSE
+        // ==================================================
+
+        if (
+          interaction.customId ===
+          "confirm_close_ticket"
+        ) {
+
+          if (
+            !isStaff(interaction)
+          ) {
+
+            const topic =
+              interaction.channel.topic ||
+              "";
+
+            const ownerMatch =
+              topic.match(
+                /TICKET_OWNER:(\d+)/
+              );
+
+            if (
+              !ownerMatch ||
+              ownerMatch[1] !==
+                interaction.user.id
+            ) {
+
+              return interaction.reply({
+
+                content:
+                  "❌ ما عندك صلاحية.",
+
+                ephemeral: true,
+
+              });
+
+            }
+
+          }
+
+          await interaction.update({
+
+            content:
+              "🔒 سيتم إغلاق التكت خلال 5 ثوانٍ...",
+
+            components: [],
+
+          });
+
+          setTimeout(() => {
+
+            interaction.channel
+              .delete()
+              .catch(() => {});
+
+          }, 5000);
+
+          return;
+
+        }
+
+        // ==================================================
+        // CANCEL CLOSE
+        // ==================================================
+
+        if (
+          interaction.customId ===
+          "cancel_close_ticket"
+        ) {
+
+          return interaction.update({
+
+            content:
+              "✅ تم إلغاء إغلاق التكت.",
+
+            components: [],
+
+          });
+
+        }
+
+        // ==================================================
+        // DELETE TICKET
+        // ==================================================
+
+        if (
+          interaction.customId ===
+          "delete_ticket"
+        ) {
+
+          if (!isStaff(interaction)) {
+
+            return interaction.reply({
+
+              content:
+                "❌ حذف التكت للإدارة فقط.",
+
+              ephemeral: true,
+
+            });
+
+          }
+
+          await interaction.reply(
+            "🗑️ سيتم حذف التكت خلال 3 ثوانٍ."
+          );
+
+          setTimeout(() => {
+
+            interaction.channel
+              .delete()
+              .catch(() => {});
+
+          }, 3000);
+
+          return;
+
+        }
+
+        // ==================================================
+        // ORDER APPROVE
+        // ==================================================
+
+        if (
+          interaction.customId ===
+          "approve_order"
+        ) {
+
+          if (!isStaff(interaction)) {
+
+            return interaction.reply({
+
+              content:
+                "❌ للإدارة فقط.",
+
+              ephemeral: true,
 
             });
 
@@ -2716,20 +2484,14 @@ client.on(
 
           const messages =
             await interaction.channel.messages.fetch({
-
-              limit:
-                20,
-
+              limit: 20,
             });
 
-          let productName =
-            null;
+          let productName = null;
 
           for (
-            const [
-              ,
-              message
-            ] of messages
+            const [, message]
+            of messages
           ) {
 
             for (
@@ -2748,9 +2510,7 @@ client.on(
                     /\*\*المنتج:\*\* (.+)/
                   );
 
-                if (
-                  match
-                ) {
+                if (match) {
 
                   productName =
                     match[1].trim();
@@ -2763,17 +2523,14 @@ client.on(
 
           }
 
-          if (
-            !productName
-          ) {
+          if (!productName) {
 
             return interaction.reply({
 
               content:
                 "❌ لم أستطع تحديد المنتج.",
 
-              ephemeral:
-                true,
+              ephemeral: true,
 
             });
 
@@ -2796,16 +2553,14 @@ client.on(
               content:
                 "❌ المنتج غير موجود.",
 
-              ephemeral:
-                true,
+              ephemeral: true,
 
             });
 
           }
 
           if (
-            Number(product.stock) <=
-            0
+            Number(product.stock) <= 0
           ) {
 
             return interaction.reply({
@@ -2813,21 +2568,16 @@ client.on(
               content:
                 "❌ المخزون أصبح 0.",
 
-              ephemeral:
-                true,
+              ephemeral: true,
 
             });
 
           }
 
           product.stock =
-            Number(
-              product.stock
-            ) - 1;
+            Number(product.stock) - 1;
 
-          saveProducts(
-            products
-          );
+          saveProducts(products);
 
           await interaction.channel.send({
 
@@ -2842,11 +2592,8 @@ client.on(
                 .setDescription(
 
                   `**المنتج:** ${product.name}\n` +
-
                   `**المبلغ:** ${product.price} ريال\n` +
-
                   `**تم بواسطة:** <@${interaction.user.id}>\n` +
-
                   `**المخزون المتبقي:** ${product.stock}`
 
                 ),
@@ -2860,35 +2607,29 @@ client.on(
             content:
               "✅ تم تأكيد الدفع وخصم المنتج من المخزون.",
 
-            ephemeral:
-              true,
+            ephemeral: true,
 
           });
 
         }
 
         // ==================================================
-        // REJECT
+        // ORDER REJECT
         // ==================================================
 
         if (
           interaction.customId ===
-          "reject"
+          "reject_order"
         ) {
 
-          if (
-            !isStaff(
-              interaction
-            )
-          ) {
+          if (!isStaff(interaction)) {
 
             return interaction.reply({
 
               content:
-                "❌ هذا الزر للإدارة فقط.",
+                "❌ للإدارة فقط.",
 
-              ephemeral:
-                true,
+              ephemeral: true,
 
             });
 
@@ -2905,7 +2646,7 @@ client.on(
                 )
 
                 .setDescription(
-                  `تم رفض الإثبات بواسطة <@${interaction.user.id}>`
+                  `تم الرفض بواسطة <@${interaction.user.id}>`
                 ),
 
             ],
@@ -2917,8 +2658,7 @@ client.on(
             content:
               "❌ تم رفض الإثبات.",
 
-            ephemeral:
-              true,
+            ephemeral: true,
 
           });
 
@@ -2933,19 +2673,14 @@ client.on(
           "close_order"
         ) {
 
-          if (
-            !isStaff(
-              interaction
-            )
-          ) {
+          if (!isStaff(interaction)) {
 
             return interaction.reply({
 
               content:
-                "❌ إغلاق طلبات المتجر متاح للإدارة فقط.",
+                "❌ للإدارة فقط.",
 
-              ephemeral:
-                true,
+              ephemeral: true,
 
             });
 
@@ -2957,18 +2692,9 @@ client.on(
 
           setTimeout(() => {
 
-            if (
-              interaction.channel &&
-              interaction.channel.deletable
-            ) {
-
-              interaction.channel
-                .delete()
-                .catch(
-                  () => {}
-                );
-
-            }
+            interaction.channel
+              .delete()
+              .catch(() => {});
 
           }, 5000);
 
@@ -2976,251 +2702,145 @@ client.on(
 
         }
 
+      }
+
+      // ==================================================
+      // MODALS
+      // ==================================================
+
+      if (interaction.isModalSubmit()) {
+
         // ==================================================
-        // OPEN TICKET
+        // RENAME
         // ==================================================
 
         if (
           interaction.customId ===
-          "open_ticket"
+          "rename_ticket_modal"
         ) {
 
-          const existing =
-            interaction.guild.channels.cache.find(
-              channel =>
-                channel.name ===
-                `ticket-${interaction.user.id}`
-            );
-
-          if (existing) {
+          if (!isStaff(interaction)) {
 
             return interaction.reply({
 
               content:
-                `🎫 عندك تكت مفتوح بالفعل: ${existing}`,
+                "❌ للإدارة فقط.",
 
-              ephemeral:
-                true,
-
-            });
-
-          }
-
-          const overwrites = [
-
-            {
-              id:
-                interaction.guild
-                  .roles.everyone.id,
-
-              deny: [
-                PermissionFlagsBits.ViewChannel,
-              ],
-
-            },
-
-            {
-              id:
-                interaction.user.id,
-
-              allow: [
-                PermissionFlagsBits.ViewChannel,
-                PermissionFlagsBits.SendMessages,
-                PermissionFlagsBits.ReadMessageHistory,
-                PermissionFlagsBits.AttachFiles,
-              ],
-
-            },
-
-          ];
-
-          if (
-            env.STAFF_ROLE_ID
-          ) {
-
-            overwrites.push({
-
-              id:
-                env.STAFF_ROLE_ID,
-
-              allow: [
-                PermissionFlagsBits.ViewChannel,
-                PermissionFlagsBits.SendMessages,
-                PermissionFlagsBits.ReadMessageHistory,
-                PermissionFlagsBits.ManageChannels,
-                PermissionFlagsBits.AttachFiles,
-              ],
+              ephemeral: true,
 
             });
 
           }
 
-          const channel =
-            await interaction.guild.channels.create({
+          let newName =
+            interaction.fields.getTextInputValue(
+              "new_ticket_name"
+            );
 
-              name:
-                `ticket-${interaction.user.id}`,
+          newName =
+            newName
+              .toLowerCase()
+              .replace(
+                /[^a-z0-9-_أ-ي]/g,
+                "-"
+              )
+              .replace(
+                /-+/g,
+                "-"
+              )
+              .slice(0, 90);
 
-              type:
-                ChannelType.GuildText,
+          if (!newName) {
 
-              parent:
-                env.TICKET_CATEGORY_ID ||
-                null,
+            return interaction.reply({
 
-              permissionOverwrites:
-                overwrites,
+              content:
+                "❌ اسم التكت غير صالح.",
+
+              ephemeral: true,
 
             });
 
-          const embed =
-            new EmbedBuilder()
+          }
 
-              .setTitle(
-                "🎫 تكت الدعم"
-              )
-
-              .setDescription(
-
-                `أهلًا <@${interaction.user.id}> 👋\n\n` +
-
-                "اكتب مشكلتك هنا وسيتم الرد عليك من الإدارة.\n\n" +
-
-                "🔒 عند الانتهاء اضغط زر **إغلاق التكت**."
-
-              )
-
-              .setFooter({
-
-                text:
-                  "Soork Store • Support",
-
-              });
-
-          await channel.send({
-
-            content:
-
-              `<@${interaction.user.id}>` +
-
-              (
-                env.STAFF_ROLE_ID
-                  ? ` <@&${env.STAFF_ROLE_ID}>`
-                  : ""
-              ),
-
-            embeds: [
-              embed,
-            ],
-
-            components: [
-              closeTicketButton(),
-            ],
-
-          });
+          await interaction.channel.setName(
+            newName
+          );
 
           return interaction.reply({
 
             content:
-              `✅ تم إنشاء التكت بنجاح: ${channel}`,
-
-            ephemeral:
-              true,
+              `✅ تم تغيير اسم التكت إلى **${newName}**`,
 
           });
 
         }
 
         // ==================================================
-        // CLOSE TICKET
+        // ADD MEMBER
         // ==================================================
 
         if (
           interaction.customId ===
-          "close_ticket"
+          "add_ticket_member_modal"
         ) {
 
-          if (
-            !interaction.channel ||
-            !interaction.channel.name ||
-            !interaction.channel.name.startsWith(
-              "ticket-"
+          if (!isStaff(interaction)) {
+
+            return interaction.reply({
+
+              content:
+                "❌ للإدارة فقط.",
+
+              ephemeral: true,
+
+            });
+
+          }
+
+          let memberId =
+            interaction.fields.getTextInputValue(
+              "member_id"
             )
-          ) {
+              .replace(/[<@!>]/g, "")
+              .trim();
+
+          const member =
+            await interaction.guild.members
+              .fetch(memberId)
+              .catch(() => null);
+
+          if (!member) {
 
             return interaction.reply({
 
               content:
-                "❌ هذا الزر يستخدم داخل التكت فقط.",
+                "❌ ما لقيت العضو. تأكد من الـ ID.",
 
-              ephemeral:
-                true,
+              ephemeral: true,
 
             });
 
           }
 
-          const ticketOwnerId =
-            interaction.channel.name
-              .replace(
-                "ticket-",
-                ""
-              );
+          await interaction.channel.permissionOverwrites.edit(
+            member.id,
+            {
 
-          const isOwner =
-            interaction.user.id ===
-            ticketOwnerId;
-
-          const staff =
-            isStaff(
-              interaction
-            );
-
-          if (
-            !isOwner &&
-            !staff
-          ) {
-
-            return interaction.reply({
-
-              content:
-                "❌ ما تقدر تقفل هذا التكت.",
-
-              ephemeral:
-                true,
-
-            });
-
-          }
-
-          await interaction.reply({
-
-            content:
-
-              `🔒 تم طلب إغلاق التكت بواسطة <@${interaction.user.id}>.\n` +
-
-              "سيتم حذف التكت خلال **5 ثوانٍ**.",
-
-          });
-
-          setTimeout(() => {
-
-            if (
-              interaction.channel &&
-              interaction.channel.deletable
-            ) {
-
-              interaction.channel
-                .delete()
-                .catch(
-                  () => {}
-                );
+              ViewChannel: true,
+              SendMessages: true,
+              ReadMessageHistory: true,
+              AttachFiles: true,
 
             }
+          );
 
-          }, 5000);
+          return interaction.reply({
 
-          return;
+            content:
+              `✅ تمت إضافة <@${member.id}> إلى التكت.`,
+
+          });
 
         }
 
@@ -3243,12 +2863,9 @@ client.on(
           content:
             "❌ حدث خطأ غير متوقع.",
 
-          ephemeral:
-            true,
+          ephemeral: true,
 
-        }).catch(
-          () => {}
-        );
+        }).catch(() => {});
 
       }
 
@@ -3265,35 +2882,32 @@ client.on(
   "messageCreate",
   async message => {
 
-    if (
-      message.author.bot
-    ) {
+    if (message.author.bot)
       return;
-    }
 
     if (
-      !message.channel.name ||
+      !message.channel ||
+      !message.channel.name
+    )
+      return;
+
+    if (
       !message.channel.name.startsWith(
         "order-"
       )
-    ) {
+    )
       return;
-    }
 
     if (
       !message.attachments.size
-    ) {
+    )
       return;
-    }
 
     const files =
       [
         ...message.attachments.values()
       ]
-        .map(
-          a =>
-            a.url
-        )
+        .map(a => a.url)
         .join("\n");
 
     const embed =
@@ -3306,9 +2920,7 @@ client.on(
         .setDescription(
 
           `**المرسل:** <@${message.author.id}>\n\n` +
-
-          "تم إرسال إثبات دفع في الطلب.\n\n" +
-
+          `تم إرسال إثبات دفع في الطلب.\n\n` +
           files
 
         )
@@ -3320,9 +2932,7 @@ client.on(
 
         });
 
-    if (
-      env.STAFF_ROLE_ID
-    ) {
+    if (env.STAFF_ROLE_ID) {
 
       await message.channel.send({
 
